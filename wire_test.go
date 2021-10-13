@@ -7,107 +7,99 @@ package jsonrpc2_test
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"reflect"
 	"testing"
 
-	"github.com/jdbaldry/jsonrpc2_v2"
+	jsonrpc2 "github.com/jdbaldry/jsonrpc2_v2"
 )
 
-var wireIDTestData = []struct {
-	name	string
-	id	jsonrpc2.ID
-	encoded	[]byte
-	plain	string
-	quoted	string
-}{
-	{
-		name:		`empty`,
-		encoded:	[]byte(`0`),
-		plain:		`0`,
-		quoted:		`#0`,
+func TestWireMessage(t *testing.T) {
+	for _, test := range []struct {
+		name	string
+		msg	jsonrpc2.Message
+		encoded	[]byte
+	}{{
+		name:		"notification",
+		msg:		newNotification("alive", nil),
+		encoded:	[]byte(`{"jsonrpc":"2.0","method":"alive"}`),
 	}, {
-		name:		`number`,
-		id:		jsonrpc2.NewIntID(43),
-		encoded:	[]byte(`43`),
-		plain:		`43`,
-		quoted:		`#43`,
+		name:		"call",
+		msg:		newCall("msg1", "ping", nil),
+		encoded:	[]byte(`{"jsonrpc":"2.0","id":"msg1","method":"ping"}`),
 	}, {
-		name:		`string`,
-		id:		jsonrpc2.NewStringID("life"),
-		encoded:	[]byte(`"life"`),
-		plain:		`life`,
-		quoted:		`"life"`,
-	},
-}
-
-func TestIDFormat(t *testing.T) {
-	for _, test := range wireIDTestData {
-		t.Run(test.name, func(t *testing.T) {
-			if got := fmt.Sprint(test.id); got != test.plain {
-				t.Errorf("got %s expected %s", got, test.plain)
-			}
-			if got := fmt.Sprintf("%q", test.id); got != test.quoted {
-				t.Errorf("got %s want %s", got, test.quoted)
-			}
-		})
-	}
-}
-
-func TestIDEncode(t *testing.T) {
-	for _, test := range wireIDTestData {
-		t.Run(test.name, func(t *testing.T) {
-			data, err := json.Marshal(&test.id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkJSON(t, data, test.encoded)
-		})
-	}
-}
-
-func TestIDDecode(t *testing.T) {
-	for _, test := range wireIDTestData {
-		t.Run(test.name, func(t *testing.T) {
-			var got *jsonrpc2.ID
-			if err := json.Unmarshal(test.encoded, &got); err != nil {
-				t.Fatal(err)
-			}
-			if got == nil {
-				t.Errorf("got nil want %s", test.id)
-			} else if *got != test.id {
-				t.Errorf("got %s want %s", got, test.id)
-			}
-		})
-	}
-}
-
-func TestErrorEncode(t *testing.T) {
-	b, err := json.Marshal(jsonrpc2.NewError(0, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkJSON(t, b, []byte(`{
-		"code": 0,
-		"message": ""
-	}`))
-}
-
-func TestErrorResponse(t *testing.T) {
-	// originally reported in #39719, this checks that result is not present if
-	// it is an error response
-	r, _ := jsonrpc2.NewResponse(jsonrpc2.NewIntID(3), nil, fmt.Errorf("computing fix edits"))
-	data, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkJSON(t, data, []byte(`{
+		name:		"response",
+		msg:		newResponse("msg2", "pong", nil),
+		encoded:	[]byte(`{"jsonrpc":"2.0","id":"msg2","result":"pong"}`),
+	}, {
+		name:		"numerical id",
+		msg:		newCall(1, "poke", nil),
+		encoded:	[]byte(`{"jsonrpc":"2.0","id":1,"method":"poke"}`),
+	}, {
+		// originally reported in #39719, this checks that result is not present if
+		// it is an error response
+		name:	"computing fix edits",
+		msg:	newResponse(3, nil, jsonrpc2.NewError(0, "computing fix edits")),
+		encoded: []byte(`{
 		"jsonrpc":"2.0",
+		"id":3,
 		"error":{
 			"code":0,
 			"message":"computing fix edits"
-		},
-		"id":3
-	}`))
+		}
+	}`),
+	}} {
+		b, err := jsonrpc2.EncodeMessage(test.msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkJSON(t, b, test.encoded)
+		msg, err := jsonrpc2.DecodeMessage(test.encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(msg, test.msg) {
+			t.Errorf("decoded message does not match\nGot:\n%+#v\nWant:\n%+#v", msg, test.msg)
+		}
+	}
+}
+
+func newNotification(method string, params interface{}) jsonrpc2.Message {
+	msg, err := jsonrpc2.NewNotification(method, params)
+	if err != nil {
+		panic(err)
+	}
+	return msg
+}
+
+func newID(id interface{}) jsonrpc2.ID {
+	switch v := id.(type) {
+	case nil:
+		return jsonrpc2.ID{}
+	case string:
+		return jsonrpc2.StringID(v)
+	case int:
+		return jsonrpc2.Int64ID(int64(v))
+	case int64:
+		return jsonrpc2.Int64ID(v)
+	default:
+		panic("invalid ID type")
+	}
+}
+
+func newCall(id interface{}, method string, params interface{}) jsonrpc2.Message {
+	msg, err := jsonrpc2.NewCall(newID(id), method, params)
+	if err != nil {
+		panic(err)
+	}
+	return msg
+}
+
+func newResponse(id interface{}, result interface{}, rerr error) jsonrpc2.Message {
+	msg, err := jsonrpc2.NewResponse(newID(id), result, rerr)
+	if err != nil {
+		panic(err)
+	}
+	return msg
 }
 
 func checkJSON(t *testing.T, got, want []byte) {
@@ -121,6 +113,6 @@ func checkJSON(t *testing.T, got, want []byte) {
 		t.Fatal(err)
 	}
 	if g.String() != w.String() {
-		t.Fatalf("Got:\n%s\nWant:\n%s", g, w)
+		t.Errorf("encoded message does not match\nGot:\n%s\nWant:\n%s", g, w)
 	}
 }
